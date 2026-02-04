@@ -1,0 +1,7 @@
+services:
+  snore-app:
+    build: .
+    container_name: snore-app
+    ports:
+      - "7860:80"
+    restart: always
