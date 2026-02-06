@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-
+import { supabase } from '../lib/supabase';
 
 export const useAudioRecorder = () => {
     const [isRecording, setIsRecording] = useState(false);
@@ -13,11 +13,20 @@ export const useAudioRecorder = () => {
     const streamRef = useRef<MediaStream | null>(null);
     const frameIdRef = useRef<number | null>(null);
 
+    // Media Recorder Refs
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const chunksRef = useRef<Blob[]>([]);
+    const startTimeRef = useRef<number>(0);
+
+    // Track maxDb in Ref to access inside closures without dependency issues
+    const maxDbRef = useRef(-100);
+
     const startRecording = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             streamRef.current = stream;
 
+            // 1. Setup Analysis (Visualizer)
             const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
             audioContextRef.current = audioContext;
 
@@ -29,13 +38,28 @@ export const useAudioRecorder = () => {
             source.connect(analyser);
             sourceRef.current = source;
 
+            // 2. Setup Recording (File Capture)
+            const mediaRecorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = mediaRecorder;
+            chunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) chunksRef.current.push(e.data);
+            };
+
+            mediaRecorder.start();
+            startTimeRef.current = Date.now();
+            maxDbRef.current = -100; // Reset for new recording
+
             setIsRecording(true);
 
+            // 3. Start Analysis Loop
             const bufferLength = analyser.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
 
             const update = () => {
-                analyser.getByteTimeDomainData(dataArray);
+                if (!analyserRef.current) return;
+                analyserRef.current.getByteTimeDomainData(dataArray);
 
                 // Calculate RMS
                 let sum = 0;
@@ -46,23 +70,19 @@ export const useAudioRecorder = () => {
                 const rms = Math.sqrt(sum / bufferLength);
 
                 // Convert to dB
-                // dB = 20 * log10(rms). 
-                // Note: RMS is between 0 and 1. log10(1) = 0dB (max). log10(0.001) = -60dB.
-                // We'll treat very quiet as -100dB.
                 const db = rms > 0 ? 20 * Math.log10(rms) : -100;
 
-                // Normalize for display roughly between -60 and 0, 
-                // or map it to a positive "Volume Level" if preferred by user.
-                // But scientific dB is negative relative to full scale.
-                // Let's display actual dB FS for now.
-
-                // Smoothing could be applied here
+                // Smoothing
                 setCurrentDb(prev => {
-                    const smoothed = prev * 0.8 + db * 0.2; // simple low-pass
+                    const smoothed = prev * 0.8 + db * 0.2;
                     return smoothed;
                 });
 
-                setMaxDb(prev => Math.max(prev, db));
+                setMaxDb(prev => {
+                    const newMax = Math.max(prev, db);
+                    maxDbRef.current = newMax;
+                    return newMax;
+                });
 
                 setHistory(prev => {
                     const newHistory = [...prev.slice(1), db];
@@ -77,10 +97,56 @@ export const useAudioRecorder = () => {
         } catch (err) {
             console.error("Error accessing microphone:", err);
             setIsRecording(false);
+            alert("Could not access microphone.");
         }
     }, []);
 
-    const stopRecording = useCallback(() => {
+    const uploadRecording = async (blob: Blob, duration: number) => {
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            const filename = `${user.id}/${Date.now()}.webm`;
+
+            // 1. Upload to Supabase Storage
+            const { error: uploadError } = await supabase.storage
+                .from('recordings')
+                .upload(filename, blob);
+
+            if (uploadError) {
+                console.error('Upload error:', uploadError);
+                return;
+            }
+
+            // 2. Get Public URL 
+            const { data: { publicUrl } } = supabase.storage
+                .from('recordings')
+                .getPublicUrl(filename);
+
+            // 3. Insert into Database
+            const { error: dbError } = await supabase
+                .from('recordings')
+                .insert({
+                    user_id: user.id,
+                    url: publicUrl,
+                    duration_seconds: duration,
+                    max_db: maxDbRef.current,
+                });
+
+            if (dbError) {
+                console.error('DB Error:', dbError);
+            } else {
+                // Optional success message
+                console.log('Recording saved successfully');
+            }
+
+        } catch (error) {
+            console.error('Error saving recording:', error);
+        }
+    };
+
+    const stopRecording = useCallback(async () => {
+        // Stop Analysis
         if (frameIdRef.current) {
             cancelAnimationFrame(frameIdRef.current);
         }
@@ -90,29 +156,50 @@ export const useAudioRecorder = () => {
         if (analyserRef.current) {
             analyserRef.current.disconnect();
         }
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-        }
         if (audioContextRef.current) {
             audioContextRef.current.close();
         }
 
+        // Stop Recording
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+
+            // We define onstop before calling stop to ensure it captures the event
+            mediaRecorderRef.current.onstop = async () => {
+                const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+                const duration = (Date.now() - startTimeRef.current) / 1000; // seconds
+
+                // Only save if it was a meaningful recording (> 1 second)
+                if (duration > 1) {
+                    await uploadRecording(blob, duration);
+                }
+            };
+
+            mediaRecorderRef.current.stop();
+        }
+
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+        }
+
         setIsRecording(false);
-        // Optional: Reset stats or keep them? Keep them is better.
     }, []);
 
     const resetStats = useCallback(() => {
         setMaxDb(-100);
         setCurrentDb(-100);
+        maxDbRef.current = -100;
         setHistory(new Array(50).fill(-100));
     }, []);
 
     // Cleanup on unmount
     useEffect(() => {
         return () => {
-            stopRecording();
+            // ensure cleanup
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
         }
-    }, [stopRecording]);
+    }, []);
 
     return { isRecording, startRecording, stopRecording, currentDb, maxDb, resetStats, history };
 };
