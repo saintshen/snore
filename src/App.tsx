@@ -6,9 +6,10 @@ import History from './pages/History';
 import Admin from './pages/Admin';
 import React, { useEffect, useState } from 'react';
 import { supabase } from './lib/supabase';
+import type { Session } from '@supabase/supabase-js';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {

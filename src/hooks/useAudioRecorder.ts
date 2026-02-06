@@ -1,6 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 
+// Extend Window interface for webkit support
+declare global {
+    interface Window {
+        webkitAudioContext: typeof AudioContext;
+    }
+}
+
 export const useAudioRecorder = () => {
     const [isRecording, setIsRecording] = useState(false);
     const [currentDb, setCurrentDb] = useState(-100);
@@ -27,7 +34,7 @@ export const useAudioRecorder = () => {
             streamRef.current = stream;
 
             // 1. Setup Analysis (Visualizer)
-            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             audioContextRef.current = audioContext;
 
             const analyser = audioContext.createAnalyser();
