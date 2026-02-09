@@ -1,6 +1,6 @@
 services:
   snore-app:
-    image: ghcr.io/saintshen/snore-app:latest
+    image: ghcr.io/saintshen/snore:latest
     container_name: snore-app
     ports:
       - "7860:80"
