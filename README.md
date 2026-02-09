@@ -58,6 +58,38 @@ A React + TypeScript application built with Vite, using Supabase for the backend
 
     The application will be available at `http://localhost:5173`.
 
+    The application will be available at `http://localhost:5173`.
+
+## Docker Deployment
+
+### Using Pre-built Image
+
+The `docker-compose.yml` is configured to use a pre-built image by default.
+
+1.  Set the `DOCKER_IMAGE_NAME` in your `.env` file (optional, defaults to `snore-app:latest`):
+    ```env
+    DOCKER_IMAGE_NAME=your-registry/snore-app:latest
+    ```
+2.  Start the container:
+    ```bash
+    docker-compose up -d
+    ```
+
+### Building and Publishing the Image
+
+Since this is a Vite app, environment variables must be baked into the image at build time. We provide a helper script for this.
+
+1.  Ensure your `.env` file contains `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+2.  Run the publish script (PowerShell):
+
+    ```powershell
+    # Basic usage (builds snore-app:latest)
+    .\scripts\publish-image.ps1
+
+    # Publish to a registry
+    .\scripts\publish-image.ps1 -Registry "myuser/" -Tag "v1.0.0"
+    ```
+
 ## Scripts
 
 -   `npm run dev`: Starts the development server.

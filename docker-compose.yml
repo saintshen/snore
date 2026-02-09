@@ -1,10 +1,6 @@
 services:
   snore-app:
-    build:
-      context: .
-      args:
-        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
-        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    image: ghcr.io/saintshen/snore-app:latest
     container_name: snore-app
     ports:
       - "7860:80"
