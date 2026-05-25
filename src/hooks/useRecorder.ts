@@ -12,7 +12,11 @@ export interface UseRecorderReturn {
     snoreCount: number;
 }
 
-export const useRecorder = (): UseRecorderReturn => {
+export interface UseRecorderOptions {
+    snoreThreshold?: number; // dB threshold for snore detection, default 45
+}
+
+export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn => {
     const [isRecording, setIsRecording] = useState(false);
     const [decibels, setDecibels] = useState(-100);
     const [error, setError] = useState<string | null>(null);
@@ -66,8 +70,8 @@ export const useRecorder = (): UseRecorderReturn => {
         }
 
         // Simple Snore Detection Threshold Logic
-        // Threshold: > 45 (arbitrary for demo/MVP, needs calibration)
-        const SNORE_THRESHOLD = 45;
+        // Threshold: configurable via options.snoreThreshold (default 45)
+        const SNORE_THRESHOLD = options.snoreThreshold ?? 45;
 
         if (db > SNORE_THRESHOLD) {
             if (!isSnoringRef.current) {
