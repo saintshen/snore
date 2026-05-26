@@ -1,0 +1,97 @@
+services:
+  # Main App
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: snore-dev-app
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - kong
+    environment:
+      - VITE_SUPABASE_URL=http://localhost:8000
+      - VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InByb2plY3QtcmVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE2Nzg4MDAwMDAsImV4cCI6MjAwMDAwMDAwMH0.M6_v8S6-S_C_K8-S_C_K8-S_C_K8-S_C_K8-S_C_K8
+      - CHOKIDAR_USEPOLLING=true
+    stdin_open: true
+    tty: true
+
+  # Database
+  db:
+    image: supabase/postgres:15.1.0.147
+    container_name: snore-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./supabase/docker/volumes/db/init:/docker-entrypoint-initdb.d
+      - snore-db-data:/var/lib/postgresql/data
+
+  # Kong - API Gateway
+  kong:
+    image: kong:2.8.1-alpine
+    container_name: snore-kong
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./supabase/docker/volumes/kong/kong.yml:/usr/local/kong/declarative/kong.yml
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/declarative/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+    depends_on:
+      - auth
+      - rest
+      - storage
+
+  # Auth (GoTrue)
+  auth:
+    image: supabase/gotrue:v2.132.3
+    container_name: snore-auth
+    depends_on:
+      - db
+    environment:
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:postgres@db:5432/postgres
+      GOTRUE_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_SITE_URL: http://localhost:5173
+      API_EXTERNAL_URL: http://localhost:8000/auth/v1
+
+  # REST (PostgREST)
+  rest:
+    image: postgrest/postgrest:v10.1.1
+    container_name: snore-rest
+    depends_on:
+      - db
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@db:5432/postgres
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
+
+  # Storage
+  storage:
+    image: supabase/storage-api:v0.40.4
+    container_name: snore-storage
+    depends_on:
+      - db
+    environment:
+      ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InByb2plY3QtcmVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE2Nzg4MDAwMDAsImV4cCI6MjAwMDAwMDAwMH0.M6_v8S6-S_C_K8-S_C_K8-S_C_K8-S_C_K8-S_C_K8
+      SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InByb2plY3QtcmVmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTY3ODgwMDAwMCwiZXhwIjoyMDAwMDAwMDAwfQ.some-signature
+      PGRST_JWT_SECRET: super-secret-jwt-token-with-at-least-32-characters-long
+      DATABASE_URL: postgres://postgres:postgres@db:5432/postgres
+      FILE_STORAGE_BACKEND: file
+      FILE_PATH: /var/lib/storage
+    volumes:
+      - snore-storage-data:/var/lib/storage
+
+volumes:
+  snore-db-data:
+  snore-storage-data:

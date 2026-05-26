@@ -1,11 +1,34 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRecorder } from '../hooks/useRecorder';
 import { Mic, Square, AlertCircle, Save } from 'lucide-react';
 import { sessionManager } from '../lib/sessionManager';
 import { supabase } from '../lib/supabase';
 
 export const Recorder: React.FC = () => {
-    const { isRecording, decibels, startRecording, stopRecording, error, formatTime, duration, snoreCount, noiseLog } = useRecorder();
+    const [snoreThreshold, setSnoreThreshold] = useState(45);
+
+    useEffect(() => {
+        const loadThreshold = async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+
+            const { data } = await (supabase
+                .from('profiles') as any)
+                .select('settings')
+                .eq('id', user.id)
+                .single();
+
+            if (data?.settings && typeof data.settings === 'object') {
+                const settings = data.settings as Record<string, unknown>;
+                if (typeof settings.snoreThreshold === 'number') {
+                    setSnoreThreshold(settings.snoreThreshold as number);
+                }
+            }
+        };
+        loadThreshold();
+    }, []);
+
+    const { isRecording, decibels, startRecording, stopRecording, error, formatTime, duration, snoreCount, noiseLog } = useRecorder({ snoreThreshold });
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const animationRef = useRef<number | null>(null);
 
@@ -103,6 +126,7 @@ export const Recorder: React.FC = () => {
             <div className="flex gap-8">
                 <div className="text-xl font-semibold text-gray-600 dark:text-gray-400">
                     Noise: <span className={decibels > 50 ? 'text-red-500' : 'text-green-500'}>{isRecording ? `${decibels} dB` : '--'}</span>
+                    <span className="text-xs text-slate-500 ml-1">(threshold: {snoreThreshold} dB)</span>
                 </div>
                 <div className="text-xl font-semibold text-gray-600 dark:text-gray-400">
                     Snores: <span className="text-blue-500">{snoreCount}</span>

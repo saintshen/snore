@@ -1,7 +1,4 @@
 import { supabase } from './supabase';
-import type { Database } from '../types/supabase';
-
-type SleepSessionInsert = Database['public']['Tables']['sleep_sessions']['Insert'];
 
 export const sessionManager = {
     async saveSession(userId: string, startTime: number, noiseLog: { timestamp: number; db: number }[], snoreCount: number) {
@@ -11,17 +8,17 @@ export const sessionManager = {
         const endTimeISO = new Date().toISOString();
 
         // Insert session
-        const sessionData: SleepSessionInsert = {
+        const sessionData = {
             user_id: userId,
             start_time: startTimeISO,
             end_time: endTimeISO,
-            noise_log: noiseLog as any, // Cast to any to avoid strict Json type mismatch with specific object array
+            noise_log: noiseLog as any,
             snore_count: snoreCount,
             quality_score: calculateQualityScore(snoreCount, noiseLog.length),
         };
 
-        const { data, error } = await supabase
-            .from('sleep_sessions')
+        const { data, error } = await (supabase
+            .from('sleep_sessions') as any)
             .insert(sessionData)
             .select()
             .single();
