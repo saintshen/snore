@@ -1,42 +1,45 @@
+import { finishedPatch, newSessionRecord, progressPatch, type NoiseSample } from './sessionDraft';
 import { supabase } from './supabase';
 
 export const sessionManager = {
-    async saveSession(userId: string, startTime: number, noiseLog: { timestamp: number; db: number }[], snoreCount: number) {
+    async startSession(userId: string, startedAtMs: number): Promise<string> {
         if (!userId) throw new Error('User not logged in');
-
-        const startTimeISO = new Date(startTime).toISOString();
-        const endTimeISO = new Date().toISOString();
-
-        // Insert session
-        const sessionData = {
-            user_id: userId,
-            start_time: startTimeISO,
-            end_time: endTimeISO,
-            noise_log: noiseLog as any,
-            snore_count: snoreCount,
-            quality_score: calculateQualityScore(snoreCount, noiseLog.length),
-        };
 
         const { data, error } = await (supabase
             .from('sleep_sessions') as any)
-            .insert(sessionData)
-            .select()
+            .insert(newSessionRecord(userId, startedAtMs))
+            .select('id')
             .single();
 
         if (error) {
-            console.error('Error saving session:', error);
+            console.error('Error starting session:', error);
             throw error;
         }
 
-        return data;
-    }
+        return data.id as string;
+    },
+
+    async updateProgress(sessionId: string, noiseLog: NoiseSample[], snoreCount: number) {
+        const { error } = await (supabase
+            .from('sleep_sessions') as any)
+            .update(progressPatch(noiseLog, snoreCount))
+            .eq('id', sessionId);
+
+        if (error) {
+            console.error('Error updating session:', error);
+            throw error;
+        }
+    },
+
+    async finishSession(sessionId: string, startedAtMs: number, endedAtMs: number, noiseLog: NoiseSample[], snoreCount: number) {
+        const { error } = await (supabase
+            .from('sleep_sessions') as any)
+            .update(finishedPatch(startedAtMs, endedAtMs, noiseLog, snoreCount))
+            .eq('id', sessionId);
+
+        if (error) {
+            console.error('Error finishing session:', error);
+            throw error;
+        }
+    },
 };
-
-function calculateQualityScore(snoreCount: number, durationSeconds: number): number {
-    if (durationSeconds === 0) return 100;
-    const hours = durationSeconds / 3600;
-    if (hours < 0.1) return 80;
-
-    const penalty = (snoreCount / hours) * 5;
-    return Math.max(0, Math.min(100, Math.round(100 - penalty)));
-}

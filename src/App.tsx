@@ -3,6 +3,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Recorder from './pages/Recorder';
 import History from './pages/History';
+import SessionDetail from './pages/SessionDetail';
 import Admin from './pages/Admin';
 import React, { useEffect, useState } from 'react';
 import { supabase } from './lib/supabase';
@@ -51,6 +52,14 @@ function App() {
           element={
             <PrivateRoute>
               <History />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/history/:id"
+          element={
+            <PrivateRoute>
+              <SessionDetail />
             </PrivateRoute>
           }
         />

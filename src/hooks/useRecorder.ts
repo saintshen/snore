@@ -1,28 +1,47 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, type RefObject } from 'react';
+import { DBFS_FLOOR, dbfsFromTimeDomain } from '../lib/level';
+import { PcmRing } from '../lib/pcmRing';
+import { clipWindow, POST_ROLL_MS, type SnoreClip } from '../lib/snoreClips';
+import { createSnoreState, flushSnore, reduceSnore, type ClosedSnore } from '../lib/snoreTracker';
+import { type NoiseSample } from '../lib/sessionDraft';
+import { DEFAULT_THRESHOLD_DBFS } from '../lib/threshold';
+import { encodeWav } from '../lib/wav';
+
+export interface RecordingSnapshot {
+    noiseLog: NoiseSample[];
+    snoreCount: number;
+    startedAt: number | null;
+}
 
 export interface UseRecorderReturn {
     isRecording: boolean;
     decibels: number;
-    startRecording: () => Promise<void>;
-    stopRecording: () => void;
+    decibelsRef: RefObject<number>;
+    thresholdRef: RefObject<number>;
+    noiseLogRef: RefObject<NoiseSample[]>;
+    snoreCountRef: RefObject<number>;
+    startRecording: () => Promise<number | null>;
+    stopRecording: () => RecordingSnapshot | null;
     error: string | null;
     formatTime: (seconds: number) => string;
     duration: number;
-    noiseLog: { timestamp: number; db: number }[];
     snoreCount: number;
 }
 
 export interface UseRecorderOptions {
-    snoreThreshold?: number; // dB threshold for snore detection, default 45
+    snoreThreshold?: number;
+    onClip?: (clip: SnoreClip) => void;
 }
 
 export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn => {
     const [isRecording, setIsRecording] = useState(false);
-    const [decibels, setDecibels] = useState(-100);
+    const [decibels, setDecibels] = useState(DBFS_FLOOR);
+    const decibelsRef = useRef(DBFS_FLOOR);
     const [error, setError] = useState<string | null>(null);
     const [duration, setDuration] = useState(0);
-    const [noiseLog, setNoiseLog] = useState<{ timestamp: number; db: number }[]>([]);
     const [snoreCount, setSnoreCount] = useState(0);
+    const noiseLogRef = useRef<NoiseSample[]>([]);
+    const snoreCountRef = useRef(0);
 
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
@@ -32,28 +51,57 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
     const startTimeRef = useRef<number | null>(null);
     const lastLogTimeRef = useRef<number>(0);
 
-    // Snore detection refs
-    const isSnoringRef = useRef(false);
-    const snoreStartTimeRef = useRef<number>(0);
+    const trackerRef = useRef(createSnoreState());
+    const timeDomainRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+    const pcmRef = useRef<PcmRing | null>(null);
+    const captureRef = useRef<AudioWorkletNode | null>(null);
+    const muteRef = useRef<GainNode | null>(null);
+    const clipTimersRef = useRef<number[]>([]);
+    const waitingClipsRef = useRef<ClosedSnore[]>([]);
+    const onClipRef = useRef(options.onClip);
+    onClipRef.current = options.onClip;
+    // Captured when recording starts so a profile load cannot change the threshold mid-session.
+    const thresholdRef = useRef(DEFAULT_THRESHOLD_DBFS);
+    const stoppedRef = useRef(false);
+    const runIdRef = useRef(0);
+    const stopRecordingRef = useRef<() => void>(() => {});
+
+    const emitClip = (closed: ClosedSnore, postRollMs: number) => {
+        const pcm = pcmRef.current;
+        if (!pcm) return;
+        const window = clipWindow(closed.startedAt, closed.endedAt, postRollMs);
+        const samples = pcm.slice(window.startMs, window.endMs);
+        if (samples.length === 0) {
+            console.warn('snore clip had no audio samples');
+            return;
+        }
+        onClipRef.current?.({
+            blob: encodeWav(samples, pcm.sampleRate),
+            startedAt: closed.startedAt,
+            endedAt: closed.endedAt,
+            peakDbfs: closed.peakDbfs,
+            durationSeconds: Math.max(1, Math.round(samples.length / pcm.sampleRate)),
+        });
+    };
+
+    const scheduleClip = (closed: ClosedSnore) => {
+        waitingClipsRef.current.push(closed);
+        const timer = window.setTimeout(() => {
+            waitingClipsRef.current = waitingClipsRef.current.filter((item) => item !== closed);
+            emitClip(closed, POST_ROLL_MS);
+        }, POST_ROLL_MS);
+        clipTimersRef.current.push(timer);
+    };
 
     const analyze = useCallback(() => {
-        if (!analyserRef.current) return;
+        if (stoppedRef.current || !analyserRef.current) return;
 
-        const bufferLength = analyserRef.current.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-        analyserRef.current.getByteFrequencyData(dataArray);
+        const samples = timeDomainRef.current;
+        if (!samples) return;
+        analyserRef.current.getFloatTimeDomainData(samples);
+        const db = dbfsFromTimeDomain(samples);
 
-        // Calculate RMS (Root Mean Square)
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-            sum += dataArray[i] * dataArray[i];
-        }
-        const rms = Math.sqrt(sum / bufferLength);
-
-        // Simple mapping for UI: value between 0 and 100
-        // Real snore detection would use a calibrated dBA calculation
-        const db = Math.round((rms / 255) * 100);
-
+        decibelsRef.current = db;
         setDecibels(db);
 
         const now = Date.now();
@@ -64,75 +112,118 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
 
             // Throttle logging to once per second
             if (now - lastLogTimeRef.current >= 1000) {
-                setNoiseLog(prev => [...prev, { timestamp: now, db }]);
+                noiseLogRef.current = [...noiseLogRef.current, { timestamp: now, db }];
                 lastLogTimeRef.current = now;
             }
         }
 
-        // Simple Snore Detection Threshold Logic
-        // Threshold: configurable via options.snoreThreshold (default 45)
-        const SNORE_THRESHOLD = options.snoreThreshold ?? 45;
-
-        if (db > SNORE_THRESHOLD) {
-            if (!isSnoringRef.current) {
-                // Snore started
-                isSnoringRef.current = true;
-                snoreStartTimeRef.current = now;
-                console.log('Snore detected start', now);
-            }
-        } else {
-            if (isSnoringRef.current) {
-                // Snore ended
-                // Debounce: verify minimal duration > 0.5s to count as snore
-                if (now - snoreStartTimeRef.current > 500) {
-                    setSnoreCount(prev => prev + 1);
-                    console.log('Snore event confirmed');
-                }
-                isSnoringRef.current = false;
-            }
+        const step = reduceSnore(trackerRef.current, db, now, thresholdRef.current);
+        if (step.closed) scheduleClip(step.closed);
+        if (step.state.count !== trackerRef.current.count) {
+            snoreCountRef.current = step.state.count;
+            setSnoreCount(step.state.count);
         }
+        trackerRef.current = step.state;
 
-        requestRef.current = requestAnimationFrame(analyze);
+        if (!stoppedRef.current) {
+            requestRef.current = requestAnimationFrame(analyze);
+        }
     }, []);
 
     const startRecording = async () => {
+        const runId = ++runIdRef.current;
         try {
             setError(null);
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (runId !== runIdRef.current) {
+                stream.getTracks().forEach(track => track.stop());
+                return null;
+            }
             streamRef.current = stream;
 
             const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
             audioContextRef.current = audioContext;
+            await audioContext.resume();
 
             const analyser = audioContext.createAnalyser();
-            analyser.fftSize = 256;
+            analyser.fftSize = 2048;
             analyserRef.current = analyser;
+            timeDomainRef.current = new Float32Array(new ArrayBuffer(analyser.fftSize * Float32Array.BYTES_PER_ELEMENT));
 
             const source = audioContext.createMediaStreamSource(stream);
             sourceRef.current = source;
             source.connect(analyser);
 
-            startTimeRef.current = Date.now();
-            lastLogTimeRef.current = Date.now();
+            await audioContext.audioWorklet.addModule(new URL('../worklets/pcmCapture.js', import.meta.url));
+            const capture = new AudioWorkletNode(audioContext, 'pcm-capture');
+            const mute = audioContext.createGain();
+            mute.gain.value = 0;
+            pcmRef.current = new PcmRing(audioContext.sampleRate);
+            capture.port.onmessage = (event: MessageEvent<Float32Array>) => {
+                pcmRef.current?.write(event.data, Date.now());
+            };
+            source.connect(capture);
+            capture.connect(mute);
+            mute.connect(audioContext.destination);
+            captureRef.current = capture;
+            muteRef.current = mute;
 
-            // Reset session data
-            setNoiseLog([]);
+            const startedAt = Date.now();
+            startTimeRef.current = startedAt;
+            lastLogTimeRef.current = startedAt;
+            stoppedRef.current = false;
+            thresholdRef.current = options.snoreThreshold ?? DEFAULT_THRESHOLD_DBFS;
+            trackerRef.current = createSnoreState();
+            noiseLogRef.current = [];
+            snoreCountRef.current = 0;
+            waitingClipsRef.current = [];
+            clipTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+            clipTimersRef.current = [];
+
             setSnoreCount(0);
             setIsRecording(true);
 
-            // Start analysis loop
             requestRef.current = requestAnimationFrame(analyze);
+            return startedAt;
 
         } catch (err: any) {
             console.error('Error accessing microphone:', err);
             setError('Could not access microphone. Please allow permissions.');
+            return null;
         }
     };
 
     const stopRecording = () => {
+        const active = requestRef.current !== null || audioContextRef.current !== null || streamRef.current !== null || trackerRef.current.open;
+        runIdRef.current += 1;
+        if (!active) return null;
+
+        stoppedRef.current = true;
         if (requestRef.current) {
             cancelAnimationFrame(requestRef.current);
+            requestRef.current = null;
         }
+
+        const flushed = flushSnore(trackerRef.current, Date.now());
+        trackerRef.current = createSnoreState();
+        snoreCountRef.current = flushed.state.count;
+        setSnoreCount(flushed.state.count);
+        clipTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+        clipTimersRef.current = [];
+        const waiting = waitingClipsRef.current;
+        waitingClipsRef.current = [];
+        for (const closed of waiting) emitClip(closed, POST_ROLL_MS);
+        if (flushed.closed) emitClip(flushed.closed, POST_ROLL_MS);
+        const snapshot: RecordingSnapshot = {
+            noiseLog: noiseLogRef.current,
+            snoreCount: flushed.state.count,
+            startedAt: startTimeRef.current,
+        };
+
+        captureRef.current?.disconnect();
+        muteRef.current?.disconnect();
+        captureRef.current = null;
+        muteRef.current = null;
 
         if (audioContextRef.current) {
             audioContextRef.current.close();
@@ -145,15 +236,17 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
         }
 
         setIsRecording(false);
-        setDecibels(-100);
-        // Note: We keep noiseLog and snoreCount populated so we can do something with them (like upload)
+        decibelsRef.current = DBFS_FLOOR;
+        setDecibels(DBFS_FLOOR);
         startTimeRef.current = null;
+        return snapshot;
     };
+
+    stopRecordingRef.current = stopRecording;
 
     useEffect(() => {
         return () => {
-            // Cleanup on unmount, but don't reset state if just re-rendering
-            if (isRecording) stopRecording();
+            stopRecordingRef.current();
         };
     }, []);
 
@@ -166,12 +259,15 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
     return {
         isRecording,
         decibels,
+        decibelsRef,
+        thresholdRef,
+        noiseLogRef,
+        snoreCountRef,
         startRecording,
         stopRecording,
         error,
         formatTime,
         duration,
-        noiseLog,
         snoreCount
     };
 };

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { deleteSleepSession } from '../lib/clipStore';
 import { supabase } from '../lib/supabase';
 import { ArrowLeft, Trash2, Clock, Activity } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -47,17 +48,13 @@ export default function History() {
 
         setDeletingId(id);
         try {
-            const { error } = await supabase
-                .from('sleep_sessions')
-                .delete()
-                .eq('id', id);
-
-            if (error) throw error;
-
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) throw new Error('User not logged in');
+            await deleteSleepSession(user.id, id);
             setSessions(prev => prev.filter(s => s.id !== id));
         } catch (error) {
             console.error('Error deleting session:', error);
-            alert('Failed to delete session.');
+            alert('Failed to delete session. Its audio is still stored, so the session was kept.');
         } finally {
             setDeletingId(null);
         }
@@ -100,13 +97,14 @@ export default function History() {
                 ) : (
                     <div className="space-y-4">
                         {sessions.map((session) => {
+                            const incomplete = session.end_time == null;
                             const ql = qualityLabel(session.quality_score);
                             return (
                                 <div
                                     key={session.id}
                                     className="bg-slate-800 p-5 rounded-xl flex items-center justify-between border border-slate-700 hover:border-emerald-500/50 transition group"
                                 >
-                                    <div className="flex items-center gap-4">
+                                    <Link to={`/history/${session.id}`} className="flex items-center gap-4 flex-1 min-w-0">
                                         <div className="p-3 bg-slate-700 rounded-xl">
                                             <Activity size={22} className="text-emerald-400" />
                                         </div>
@@ -132,17 +130,25 @@ export default function History() {
                                                     {formatDuration(session.start_time, session.end_time)}
                                                 </span>
                                                 <span>Snores: <span className="text-blue-400 font-medium">{session.snore_count}</span></span>
-                                                <span className={`font-medium ${ql.color}`}>
-                                                    Quality: {ql.label} {session.quality_score !== null ? `(${session.quality_score})` : ''}
-                                                </span>
+                                                {incomplete ? (
+                                                    <span className="font-medium text-amber-400">Incomplete</span>
+                                                ) : (
+                                                    <span className={`font-medium ${ql.color}`}>
+                                                        Quality: {ql.label} {session.quality_score !== null ? `(${session.quality_score})` : ''}
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
-                                    </div>
+                                    </Link>
 
                                     <button
-                                        onClick={() => handleDelete(session.id)}
+                                        onClick={(event) => {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            void handleDelete(session.id);
+                                        }}
                                         disabled={deletingId === session.id}
-                                        className="p-2 text-slate-600 hover:text-red-400 hover:bg-red-900/20 rounded-lg transition opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                                        className="p-2 text-slate-600 hover:text-red-400 hover:bg-red-900/20 rounded-lg transition opacity-100 md:opacity-0 md:group-hover:opacity-100 disabled:opacity-50"
                                         title="Delete session"
                                     >
                                         {deletingId === session.id ? (

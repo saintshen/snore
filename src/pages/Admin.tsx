@@ -2,6 +2,15 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, Users, Mic, TrendingUp, AlertCircle, Clock } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { DEFAULT_THRESHOLD_DBFS, THRESHOLD_MAX_DBFS, THRESHOLD_MIN_DBFS, thresholdFromSettings } from '../lib/threshold';
+
+interface AdminSession {
+    id: string;
+    snore_count: number | null;
+    quality_score: number | null;
+    start_time: string;
+    end_time: string | null;
+}
 
 export default function Admin() {
     const [stats, setStats] = useState({
@@ -10,9 +19,9 @@ export default function Admin() {
         avgQuality: null as number | null,
         totalDuration: 0,
     });
-    const [recentSessions, setRecentSessions] = useState<unknown[]>([]);
+    const [recentSessions, setRecentSessions] = useState<AdminSession[]>([]);
     const [loading, setLoading] = useState(true);
-    const [threshold, setThreshold] = useState(45);
+    const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD_DBFS);
     const [thresholdLoading, setThresholdLoading] = useState(false);
     const [thresholdSaved, setThresholdSaved] = useState(false);
 
@@ -28,17 +37,16 @@ export default function Admin() {
 
             const { data: sessions, error } = await (supabase
                 .from('sleep_sessions') as any)
-                .select('snore_count, quality_score, start_time, end_time')
+                .select('id, snore_count, quality_score, start_time, end_time')
                 .eq('user_id', user.id)
-                .order('created_at', { ascending: false })
-                .limit(10);
+                .order('start_time', { ascending: false });
 
             if (error) throw error;
 
-            const typedSessions: Array<{ snore_count?: number; quality_score?: number; end_time?: string | null; start_time?: string }> = sessions ?? [];
+            const typedSessions: AdminSession[] = sessions ?? [];
             const totalSessions = typedSessions.length;
             const totalSnores = typedSessions.reduce((sum, s) => sum + (s.snore_count ?? 0), 0);
-            const scores = typedSessions.map(s => s.quality_score).filter((s): s is number => s !== null);
+            const scores = typedSessions.map(s => s.quality_score).filter((s): s is number => s !== null && s !== undefined);
             const avgQuality = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
             const totalDuration = typedSessions.reduce((sum, s) => {
                 if (!s.end_time || !s.start_time) return sum;
@@ -46,7 +54,7 @@ export default function Admin() {
             }, 0);
 
             setStats({ totalSessions, totalSnores, avgQuality, totalDuration });
-            setRecentSessions(sessions ?? []);
+            setRecentSessions(typedSessions.slice(0, 10));
         } catch (error) {
             console.error('Error fetching stats:', error);
         } finally {
@@ -66,12 +74,7 @@ export default function Admin() {
                 .single();
 
             if (error) throw error;
-            if (data?.settings && typeof data.settings === 'object') {
-                const settings = data.settings as Record<string, unknown>;
-                if (typeof settings.snoreThreshold === 'number') {
-                    setThreshold(settings.snoreThreshold as number);
-                }
-            }
+            setThreshold(thresholdFromSettings(data?.settings));
         } catch (error) {
             console.error('Error fetching threshold:', error);
         }
@@ -93,12 +96,13 @@ export default function Admin() {
             if (fetchError) throw fetchError;
 
             const currentSettings = (profile?.settings && typeof profile.settings === 'object')
-                ? (profile.settings as Record<string, unknown>)
+                ? { ...(profile.settings as Record<string, unknown>) }
                 : {};
+            delete currentSettings.snoreThreshold;
 
             const { error } = await (supabase
                 .from('profiles') as any)
-                .update({ settings: { ...currentSettings, snoreThreshold: threshold } })
+                .update({ settings: { ...currentSettings, snoreThresholdDbfs: threshold } })
                 .eq('id', user.id);
 
             if (error) throw error;
@@ -172,19 +176,21 @@ export default function Admin() {
                 <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 mb-8">
                     <h2 className="text-xl font-bold mb-4">Snore Detection Threshold</h2>
                     <p className="text-slate-400 text-sm mb-4">
-                        Configure the decibel threshold for snore detection. Sounds above this level (in dB) will be flagged as potential snores.
-                        Default: 45 dB. Lower = more sensitive.
+                        Sounds above this level count as one snore until they fall 6 dBFS below it.
+                        The meter is dBFS, relative to the microphone full scale, not a calibrated dBA reading.
+                        Default: {DEFAULT_THRESHOLD_DBFS} dBFS. More negative is more sensitive.
                     </p>
                     <div className="flex items-center gap-4">
                         <input
                             type="range"
-                            min="20"
-                            max="80"
+                            min={THRESHOLD_MIN_DBFS}
+                            max={THRESHOLD_MAX_DBFS}
+                            step={1}
                             value={threshold}
                             onChange={(e) => setThreshold(Number(e.target.value))}
                             className="flex-1 accent-emerald-400"
                         />
-                        <span className="text-2xl font-mono font-bold text-emerald-400 w-16 text-right">{threshold} dB</span>
+                        <span className="text-2xl font-mono font-bold text-emerald-400 w-32 text-right">{threshold} dBFS</span>
                         <button
                             onClick={saveThreshold}
                             disabled={thresholdLoading}
@@ -202,7 +208,7 @@ export default function Admin() {
                         <p className="text-slate-500">No sessions recorded yet.</p>
                     ) : (
                         <div className="space-y-3">
-                            {recentSessions.map((session: any) => (
+                            {recentSessions.map((session) => (
                                 <div key={session.id} className="flex justify-between items-center p-3 bg-slate-700/50 rounded-lg">
                                     <div>
                                         <span className="font-medium">{new Date(session.start_time).toLocaleDateString()}</span>
