@@ -44,7 +44,7 @@ export default function History() {
     };
 
     const handleDelete = async (id: string) => {
-        if (!confirm('Delete this session? This cannot be undone.')) return;
+        if (!confirm('Delete this recording? This attempts to delete its metadata and associated clips and cannot be undone.')) return;
 
         setDeletingId(id);
         try {
@@ -54,7 +54,7 @@ export default function History() {
             setSessions(prev => prev.filter(s => s.id !== id));
         } catch (error) {
             console.error('Error deleting session:', error);
-            alert('Failed to delete session. Its audio is still stored, so the session was kept.');
+            alert('Failed to delete recording. Associated audio may still be stored, so the recording was kept.');
         } finally {
             setDeletingId(null);
         }
@@ -84,7 +84,7 @@ export default function History() {
                         <ArrowLeft size={20} />
                     </Link>
                     <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
-                        History
+                        Recordings
                     </h1>
                 </div>
 
@@ -92,7 +92,7 @@ export default function History() {
                     <div className="text-center text-slate-400">Loading history...</div>
                 ) : sessions.length === 0 ? (
                     <div className="text-center text-slate-500 py-12 bg-slate-800/30 rounded-2xl">
-                        No sessions recorded yet.
+                        No recordings yet.
                     </div>
                 ) : (
                     <div className="space-y-4">
@@ -129,7 +129,7 @@ export default function History() {
                                                     <Clock size={13} />
                                                     {formatDuration(session.start_time, session.end_time)}
                                                 </span>
-                                                <span>Snores: <span className="text-blue-400 font-medium">{session.snore_count}</span></span>
+                                                <span>Possible Snore Events: <span className="text-blue-400 font-medium">{session.snore_count}</span></span>
                                                 {incomplete ? (
                                                     <span className="font-medium text-amber-400">Incomplete</span>
                                                 ) : (
@@ -149,7 +149,7 @@ export default function History() {
                                         }}
                                         disabled={deletingId === session.id}
                                         className="p-2 text-slate-600 hover:text-red-400 hover:bg-red-900/20 rounded-lg transition opacity-100 md:opacity-0 md:group-hover:opacity-100 disabled:opacity-50"
-                                        title="Delete session"
+                                        title="Delete recording"
                                     >
                                         {deletingId === session.id ? (
                                             <span className="text-xs">...</span>

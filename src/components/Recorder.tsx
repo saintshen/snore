@@ -6,28 +6,39 @@ import { uploadSnoreClip } from '../lib/clipStore';
 import { CLIP_LIMIT, type SnoreClip } from '../lib/snoreClips';
 import { SESSION_FLUSH_MS } from '../lib/sessionDraft';
 import { sessionManager } from '../lib/sessionManager';
-import { supabase } from '../lib/supabase';
+import { profilesTable, supabase } from '../lib/supabase';
 import { DEFAULT_THRESHOLD_DBFS, thresholdFromSettings } from '../lib/threshold';
+import { clipSavingDefaultFromSettings } from '../lib/profileSettings';
 
 const PROGRESS_ERROR = "Couldn't save progress. Recording continues.";
+const SAVE_ERROR = "Couldn't save this recording.";
+const STOP_RETRY_DELAYS_MS = [0, 2_000, 5_000];
 
 export const Recorder: React.FC = () => {
     const [snoreThreshold, setSnoreThreshold] = useState(DEFAULT_THRESHOLD_DBFS);
+    const [saveClipsForRecording, setSaveClipsForRecording] = useState(false);
+    const [profileSettingsLoading, setProfileSettingsLoading] = useState(true);
 
     useEffect(() => {
-        const loadThreshold = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) return;
+        const loadProfileSettings = async () => {
+            try {
+                const { data: { user } } = await supabase.auth.getUser();
+                if (!user) return;
 
-            const { data } = await (supabase
-                .from('profiles') as any)
-                .select('settings')
-                .eq('id', user.id)
-                .single();
+                const { data } = await profilesTable()
+                    .select('settings')
+                    .eq('id', user.id)
+                    .single();
 
-            setSnoreThreshold(thresholdFromSettings(data?.settings));
+                setSnoreThreshold(thresholdFromSettings(data?.settings));
+                setSaveClipsForRecording(clipSavingDefaultFromSettings(data?.settings ?? null));
+            } catch (err) {
+                console.error('Failed to load profile settings:', err);
+            } finally {
+                setProfileSettingsLoading(false);
+            }
         };
-        loadThreshold();
+        loadProfileSettings();
     }, []);
 
     const clipHandlerRef = useRef<(clip: SnoreClip) => void>(() => {});
@@ -37,6 +48,8 @@ export const Recorder: React.FC = () => {
     });
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const sessionIdRef = useRef<string | null>(null);
+    const startPendingRef = useRef(false);
+    const recordingStartedAtRef = useRef<number | null>(null);
     const stopRequestedRef = useRef(false);
     const earlyStopRef = useRef<RecordingSnapshot | null>(null);
     const cancelledRef = useRef(false);
@@ -46,6 +59,7 @@ export const Recorder: React.FC = () => {
     const [clipLimitReached, setClipLimitReached] = useState(false);
     const clipQueueRef = useRef<SnoreClip[]>([]);
     const savedClipsRef = useRef(0);
+    const saveClipsForRecordingRef = useRef(false);
     const userIdRef = useRef<string | null>(null);
 
     const saveClip = async (sessionId: string, clip: SnoreClip) => {
@@ -64,6 +78,8 @@ export const Recorder: React.FC = () => {
     };
 
     const handleClip = (clip: SnoreClip) => {
+        if (!saveClipsForRecordingRef.current) return;
+
         if (savedClipsRef.current >= CLIP_LIMIT) {
             setClipLimitReached(true);
             return;
@@ -112,61 +128,111 @@ export const Recorder: React.FC = () => {
 
         frame = requestAnimationFrame(draw);
         return () => cancelAnimationFrame(frame);
-    }, [isRecording]);
+    }, [decibelsRef, isRecording, thresholdRef]);
 
-    const finishRow = async (sessionId: string, startedAt: number, noiseLog: typeof noiseLogRef.current, count: number) => {
-        await sessionManager.finishSession(sessionId, startedAt, Date.now(), noiseLog, count);
+    const createSession = async (startedAt: number): Promise<string> => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) throw new Error('User not logged in');
+        userIdRef.current = user.id;
+        return sessionManager.startSession(user.id, startedAt);
     };
 
+    const flushQueuedClips = (sessionId: string) => {
+        const queued = clipQueueRef.current;
+        clipQueueRef.current = [];
+        if (!saveClipsForRecordingRef.current) return;
+        for (const clip of queued) void saveClip(sessionId, clip);
+    };
+
+    // Saves a stopped Recording, creating its row first if the start never succeeded.
+    // Retries a few times because this is the last chance to keep the night's data.
+    const saveStopped = async (snapshot: RecordingSnapshot) => {
+        let sessionId = sessionIdRef.current;
+        sessionIdRef.current = null;
+        const startedAt = snapshot.startedAt ?? Date.now();
+
+        for (const delay of STOP_RETRY_DELAYS_MS) {
+            if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+            try {
+                sessionId ??= await createSession(startedAt);
+                await sessionManager.finishSession(sessionId, startedAt, Date.now(), snapshot.noiseLog, snapshot.snoreCount);
+                flushQueuedClips(sessionId);
+                setSaveError(null);
+                return;
+            } catch (err) {
+                console.error(err);
+            }
+        }
+        setSaveError(SAVE_ERROR);
+    };
+    const saveStoppedRef = useRef(saveStopped);
+    saveStoppedRef.current = saveStopped;
+
+    // Creates the session row while recording. On failure the row stays missing and the
+    // progress timer (or Wake Up) tries again, so a failed start never drops the Recording.
+    const openSession = async (startedAt: number) => {
+        if (startPendingRef.current) return;
+        startPendingRef.current = true;
+        let opened = false;
+        try {
+            sessionIdRef.current = await createSession(startedAt);
+            opened = true;
+        } catch (err) {
+            console.error(err);
+        }
+        startPendingRef.current = false;
+
+        if (stopRequestedRef.current || cancelledRef.current) {
+            const snap = earlyStopRef.current ?? {
+                startedAt,
+                noiseLog: noiseLogRef.current,
+                snoreCount: snoreCountRef.current,
+            };
+            earlyStopRef.current = null;
+            stopRequestedRef.current = false;
+            await saveStopped(snap);
+            return;
+        }
+
+        if (!opened || !sessionIdRef.current) {
+            setSaveError(PROGRESS_ERROR);
+            return;
+        }
+        flushQueuedClips(sessionIdRef.current);
+        setSaveError((current) => current === PROGRESS_ERROR ? null : current);
+    };
+    const openSessionRef = useRef(openSession);
+    openSessionRef.current = openSession;
+
     const handleStart = async () => {
+        if (profileSettingsLoading) return;
+
         setSaveError(null);
         setClipLimitReached(false);
+        saveClipsForRecordingRef.current = saveClipsForRecording;
         savedClipsRef.current = 0;
         clipQueueRef.current = [];
+        sessionIdRef.current = null;
+        earlyStopRef.current = null;
         stopRequestedRef.current = false;
         const startedAt = await startRecording();
         if (startedAt == null) return;
 
-        try {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) throw new Error('User not logged in');
-            userIdRef.current = user.id;
-            const sessionId = await sessionManager.startSession(user.id, startedAt);
-            if (stopRequestedRef.current || cancelledRef.current) {
-                const snap = earlyStopRef.current;
-                earlyStopRef.current = null;
-                stopRequestedRef.current = false;
-                await finishRow(sessionId, snap?.startedAt ?? startedAt, snap?.noiseLog ?? noiseLogRef.current, snap?.snoreCount ?? snoreCountRef.current);
-                setSaveError(null);
-                return;
-            }
-            sessionIdRef.current = sessionId;
-            const queued = clipQueueRef.current;
-            clipQueueRef.current = [];
-            for (const clip of queued) void saveClip(sessionId, clip);
-        } catch (err) {
-            console.error(err);
-            setSaveError(PROGRESS_ERROR);
-        }
+        recordingStartedAtRef.current = startedAt;
+        await openSession(startedAt);
     };
 
     const handleStop = async () => {
         const snapshot = stopRecording();
         if (!snapshot) return;
-        const sessionId = sessionIdRef.current;
-        sessionIdRef.current = null;
-        if (!sessionId) {
+        recordingStartedAtRef.current = null;
+        if (startPendingRef.current) {
+            // openSession finishes the Recording once its in-flight start settles.
             earlyStopRef.current = snapshot;
             stopRequestedRef.current = true;
             return;
         }
-        try {
-            await finishRow(sessionId, snapshot.startedAt ?? Date.now(), snapshot.noiseLog, snapshot.snoreCount);
-            setSaveError(null);
-        } catch (err) {
-            console.error(err);
-            setSaveError("Couldn't save this session.");
-        }
+        await saveStopped(snapshot);
     };
 
     useEffect(() => {
@@ -174,7 +240,11 @@ export const Recorder: React.FC = () => {
 
         const timer = window.setInterval(() => {
             const sessionId = sessionIdRef.current;
-            if (!sessionId) return;
+            if (!sessionId) {
+                const startedAt = recordingStartedAtRef.current;
+                if (startedAt != null) void openSessionRef.current(startedAt);
+                return;
+            }
             sessionManager.updateProgress(sessionId, noiseLogRef.current, snoreCountRef.current)
                 .then(() => setSaveError((current) => current === PROGRESS_ERROR ? null : current))
                 .catch((err) => {
@@ -193,12 +263,11 @@ export const Recorder: React.FC = () => {
         cancelledRef.current = false;
         return () => {
             cancelledRef.current = true;
-            const sessionId = sessionIdRef.current;
-            if (!sessionId) return;
-            sessionIdRef.current = null;
+            // An in-flight start sees cancelledRef and saves the Recording itself.
+            if (startPendingRef.current) return;
             const snap = stopRecordingRef.current();
             if (!snap?.startedAt) return;
-            void sessionManager.finishSession(sessionId, snap.startedAt, Date.now(), snap.noiseLog, snap.snoreCount);
+            void saveStoppedRef.current(snap);
         };
     }, []);
 
@@ -282,10 +351,28 @@ export const Recorder: React.FC = () => {
                     <span className="text-xs text-slate-500 ml-1">(threshold: {snoreThreshold} dBFS)</span>
                 </div>
                 <div className="text-xl font-semibold text-gray-600 dark:text-gray-400">
-                    Snores: <span className="text-blue-500">{snoreCount}</span>
+                    Possible Snore Events: <span className="text-blue-500">{snoreCount}</span>
                 </div>
             </div>
-            <p className="text-xs text-slate-500 -mt-4 text-center">A continuous stretch above the threshold counts as one snore. The meter is dBFS (full scale), not dBA.</p>
+            <p className="text-xs text-slate-500 -mt-4 text-center">A continuous stretch above the threshold counts as one Possible Snore Event. The meter is dBFS (full scale), not dBA.</p>
+
+            <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900/60 p-4 text-left">
+                <label htmlFor="save-clips-for-recording" className="flex items-start gap-3 text-sm font-medium text-slate-100">
+                    <input
+                        id="save-clips-for-recording"
+                        type="checkbox"
+                        checked={saveClipsForRecording}
+                        disabled={isRecording || profileSettingsLoading}
+                        aria-describedby="save-clips-privacy"
+                        onChange={(event) => setSaveClipsForRecording(event.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-800 text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <span>Save possible snore audio clips for this Recording</span>
+                </label>
+                <p id="save-clips-privacy" className="mt-2 pl-7 text-xs text-slate-400">
+                    Sleep audio may capture speech or other private household sounds.
+                </p>
+            </div>
 
             {/* Controls */}
             <div className="flex gap-4">
@@ -293,10 +380,11 @@ export const Recorder: React.FC = () => {
                     <div className="flex flex-col gap-2 items-center">
                         <button
                             onClick={handleStart}
-                            className="flex items-center gap-2 px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-xl font-bold shadow-lg transition-transform hover:scale-105 active:scale-95"
+                            disabled={profileSettingsLoading}
+                            className="flex items-center gap-2 px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-xl font-bold shadow-lg transition-transform hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100 disabled:hover:bg-blue-600"
                         >
                             <Mic size={28} />
-                            Start Sleep
+                            {profileSettingsLoading ? 'Loading settings...' : 'Start Sleep'}
                         </button>
                     </div>
 
@@ -328,7 +416,7 @@ export const Recorder: React.FC = () => {
                 <p className="text-xs text-amber-300 text-center">The screen may sleep, and recording may stop.</p>
             )}
             {clipLimitReached && (
-                <p className="text-xs text-amber-300 text-center">Clip limit reached ({CLIP_LIMIT}). Later snores are counted but not saved.</p>
+                <p className="text-xs text-amber-300 text-center">Clip limit reached ({CLIP_LIMIT}). Later Possible Snore Events are counted but not saved as clips.</p>
             )}
         </div>
     );

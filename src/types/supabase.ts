@@ -28,6 +28,7 @@ export interface Database {
                     settings?: Json
                     updated_at?: string
                 }
+                Relationships: []
             }
             sleep_sessions: {
                 Row: {
@@ -60,6 +61,7 @@ export interface Database {
                     quality_score?: number | null
                     created_at?: string
                 }
+                Relationships: []
             }
             snore_events: {
                 Row: {
@@ -95,7 +97,14 @@ export interface Database {
                     confidence_score?: number | null
                     created_at?: string
                 }
+                Relationships: []
             }
+        }
+        Views: {
+            [_ in never]: never
+        }
+        Functions: {
+            [_ in never]: never
         }
     }
 }
