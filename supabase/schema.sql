@@ -5,7 +5,7 @@ create extension if not exists "uuid-ossp";
 create table profiles (
   id uuid references auth.users on delete cascade not null primary key,
   subscription_tier text check (subscription_tier in ('free', 'premium')) default 'free',
-  settings jsonb default '{"sensitivity": 5, "notify": false}'::jsonb,
+  settings jsonb default '{"sensitivity": 5, "notify": false, "saveClipsDefault": false}'::jsonb,
   updated_at timestamp with time zone default timezone('utc'::text, now())
 );
 

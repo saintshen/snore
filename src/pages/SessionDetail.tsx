@@ -3,21 +3,17 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Trash2 } from 'lucide-react';
 import { deleteSleepSession } from '../lib/clipStore';
 import { DBFS_FLOOR } from '../lib/level';
-import { supabase } from '../lib/supabase';
+import { sleepSessionsTable, snoreEventsTable, supabase } from '../lib/supabase';
+import type { SnoreEventRow as DbSnoreEventRow } from '../lib/dbTypes';
 
 interface NoisePoint {
     timestamp: number;
     db: number;
 }
 
-interface SnoreEventRow {
-    id: string;
-    timestamp: string;
-    audio_path: string;
-    duration_seconds: number | null;
-    peak_db: number | null;
+type SnoreEventWithUrl = Pick<DbSnoreEventRow, 'id' | 'timestamp' | 'audio_path' | 'duration_seconds' | 'peak_db'> & {
     url: string | null;
-}
+};
 
 function asNoiseLog(value: unknown): NoisePoint[] {
     if (!Array.isArray(value)) return [];
@@ -30,7 +26,7 @@ function asNoiseLog(value: unknown): NoisePoint[] {
 
 function LevelCurve({ log }: { log: NoisePoint[] }) {
     if (log.length < 2) {
-        return <p className="text-slate-500">No level curve was saved for this session.</p>;
+        return <p className="text-slate-500">No level curve was saved for this recording.</p>;
     }
 
     const start = log[0].timestamp;
@@ -55,7 +51,7 @@ export default function SessionDetail() {
     const navigate = useNavigate();
     const [title, setTitle] = useState('');
     const [log, setLog] = useState<NoisePoint[]>([]);
-    const [events, setEvents] = useState<SnoreEventRow[]>([]);
+    const [events, setEvents] = useState<SnoreEventWithUrl[]>([]);
     const [loading, setLoading] = useState(true);
     const [missing, setMissing] = useState(false);
     const [deleting, setDeleting] = useState(false);
@@ -67,7 +63,7 @@ export default function SessionDetail() {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) return;
 
-            const { data: session, error } = await (supabase.from('sleep_sessions') as any)
+            const { data: session, error } = await sleepSessionsTable()
                 .select('id, created_at, noise_log')
                 .eq('id', id)
                 .eq('user_id', user.id)
@@ -82,12 +78,12 @@ export default function SessionDetail() {
             setTitle(new Date(session.created_at).toLocaleString());
             setLog(asNoiseLog(session.noise_log));
 
-            const { data: rows } = await (supabase.from('snore_events') as any)
+            const { data: rows } = await snoreEventsTable()
                 .select('id, timestamp, audio_path, duration_seconds, peak_db')
                 .eq('session_id', id)
                 .order('timestamp', { ascending: true });
 
-            const withUrls: SnoreEventRow[] = [];
+            const withUrls: SnoreEventWithUrl[] = [];
             for (const row of rows ?? []) {
                 const { data: file } = await supabase.storage.from('snore-clips').download(row.audio_path);
                 withUrls.push({ ...row, url: file ? URL.createObjectURL(file) : null });
@@ -108,7 +104,7 @@ export default function SessionDetail() {
     }, [id]);
 
     const handleDelete = async () => {
-        if (!id || !confirm('Delete this session? This cannot be undone.')) return;
+        if (!id || !confirm('Delete this recording? This attempts to delete its metadata and associated clips and cannot be undone.')) return;
         setDeleting(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
@@ -117,7 +113,7 @@ export default function SessionDetail() {
             navigate('/history');
         } catch (error) {
             console.error(error);
-            alert('Failed to delete session. Its audio is still stored, so the session was kept.');
+            alert('Failed to delete recording. Associated audio may still be stored, so the recording was kept.');
             setDeleting(false);
         }
     };
@@ -130,7 +126,7 @@ export default function SessionDetail() {
                         <Link to="/history" className="p-2 bg-slate-800 rounded-lg hover:bg-slate-700 transition">
                             <ArrowLeft size={20} />
                         </Link>
-                        <h1 className="text-3xl font-bold truncate">{title || 'Session'}</h1>
+                        <h1 className="text-3xl font-bold truncate">{title || 'Recording'}</h1>
                     </div>
                     <button
                         onClick={() => void handleDelete()}
@@ -144,16 +140,16 @@ export default function SessionDetail() {
                 </div>
 
                 {loading ? (
-                    <p className="text-slate-400">Loading session...</p>
+                    <p className="text-slate-400">Loading recording...</p>
                 ) : missing ? (
-                    <p className="text-slate-500">This session is not available.</p>
+                    <p className="text-slate-500">This recording is not available.</p>
                 ) : (
                     <div className="space-y-8">
                         <LevelCurve log={log} />
                         <div className="space-y-4">
-                            <h2 className="text-xl font-semibold">Snore clips</h2>
+                            <h2 className="text-xl font-semibold">Possible snore clips</h2>
                             {events.length === 0 ? (
-                                <p className="text-slate-500">No clips were saved for this session.</p>
+                                <p className="text-slate-500">No possible snore clips were saved for this recording.</p>
                             ) : events.map((event, index) => (
                                 <div key={event.id} className="bg-slate-800 border border-slate-700 rounded-xl p-4">
                                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400 mb-3">

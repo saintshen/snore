@@ -33,6 +33,11 @@ export interface UseRecorderOptions {
     onClip?: (clip: SnoreClip) => void;
 }
 
+type BrowserWindowWithAudioContext = Window &
+    typeof globalThis & {
+        webkitAudioContext?: typeof AudioContext;
+    };
+
 export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn => {
     const [isRecording, setIsRecording] = useState(false);
     const [decibels, setDecibels] = useState(DBFS_FLOOR);
@@ -65,8 +70,9 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
     const stoppedRef = useRef(false);
     const runIdRef = useRef(0);
     const stopRecordingRef = useRef<() => void>(() => {});
+    const analyzeRef = useRef<() => void>(() => {});
 
-    const emitClip = (closed: ClosedSnore, postRollMs: number) => {
+    const emitClip = useCallback((closed: ClosedSnore, postRollMs: number) => {
         const pcm = pcmRef.current;
         if (!pcm) return;
         const window = clipWindow(closed.startedAt, closed.endedAt, postRollMs);
@@ -82,16 +88,20 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
             peakDbfs: closed.peakDbfs,
             durationSeconds: Math.max(1, Math.round(samples.length / pcm.sampleRate)),
         });
-    };
+    }, []);
 
-    const scheduleClip = (closed: ClosedSnore) => {
+    const scheduleClip = useCallback((closed: ClosedSnore) => {
         waitingClipsRef.current.push(closed);
         const timer = window.setTimeout(() => {
             waitingClipsRef.current = waitingClipsRef.current.filter((item) => item !== closed);
             emitClip(closed, POST_ROLL_MS);
         }, POST_ROLL_MS);
         clipTimersRef.current.push(timer);
-    };
+    }, [emitClip]);
+
+    const scheduleAnalyzeFrame = useCallback(() => {
+        requestRef.current = requestAnimationFrame(() => analyzeRef.current());
+    }, []);
 
     const analyze = useCallback(() => {
         if (stoppedRef.current || !analyserRef.current) return;
@@ -126,9 +136,11 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
         trackerRef.current = step.state;
 
         if (!stoppedRef.current) {
-            requestRef.current = requestAnimationFrame(analyze);
+            scheduleAnalyzeFrame();
         }
-    }, []);
+    }, [scheduleAnalyzeFrame, scheduleClip]);
+
+    analyzeRef.current = analyze;
 
     const startRecording = async () => {
         const runId = ++runIdRef.current;
@@ -141,7 +153,12 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
             }
             streamRef.current = stream;
 
-            const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const browserWindow = window as BrowserWindowWithAudioContext;
+            const AudioContextConstructor = window.AudioContext ?? browserWindow.webkitAudioContext;
+            if (!AudioContextConstructor) {
+                throw new Error('AudioContext is not supported in this browser.');
+            }
+            const audioContext = new AudioContextConstructor();
             audioContextRef.current = audioContext;
             await audioContext.resume();
 
@@ -183,10 +200,10 @@ export const useRecorder = (options: UseRecorderOptions = {}): UseRecorderReturn
             setSnoreCount(0);
             setIsRecording(true);
 
-            requestRef.current = requestAnimationFrame(analyze);
+            scheduleAnalyzeFrame();
             return startedAt;
 
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('Error accessing microphone:', err);
             setError('Could not access microphone. Please allow permissions.');
             return null;

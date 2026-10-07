@@ -12,3 +12,7 @@ export const supabase = createClient<Database>(
   supabaseUrl || '',
   supabaseAnonKey || ''
 );
+
+export const profilesTable = () => supabase.from('profiles');
+export const sleepSessionsTable = () => supabase.from('sleep_sessions');
+export const snoreEventsTable = () => supabase.from('snore_events');

@@ -1,6 +1,7 @@
 import { clipObjectPath } from './snoreClips';
 import type { SnoreClip } from './snoreClips';
-import { supabase } from './supabase';
+import type { SnoreEventInsert } from './dbTypes';
+import { snoreEventsTable, supabase } from './supabase';
 
 export async function uploadSnoreClip(userId: string, sessionId: string, clip: SnoreClip) {
     const eventId = crypto.randomUUID();
@@ -11,7 +12,7 @@ export async function uploadSnoreClip(userId: string, sessionId: string, clip: S
     });
     if (uploadError) throw uploadError;
 
-    const { error } = await (supabase.from('snore_events') as any).insert({
+    const event: SnoreEventInsert = {
         id: eventId,
         session_id: sessionId,
         user_id: userId,
@@ -20,7 +21,9 @@ export async function uploadSnoreClip(userId: string, sessionId: string, clip: S
         duration_seconds: clip.durationSeconds,
         peak_db: Math.round(clip.peakDbfs),
         confidence_score: null,
-    });
+    };
+
+    const { error } = await snoreEventsTable().insert(event);
     if (error) {
         await supabase.storage.from('snore-clips').remove([path]);
         throw error;
